@@ -1,7 +1,7 @@
 import json
 import time
 from pathlib import Path
-
+import time
 import torch
 
 
@@ -130,3 +130,85 @@ def warm_up(model, tokenizer, question, device):
     )
 
     torch.cuda.empty_cache()
+
+def generate_batch(
+    model,
+    tokenizer,
+    questions,
+    device,
+    max_new_tokens,
+):
+    prompts = []
+
+    for question in questions:
+        prompt = f"""Solve the following math problem.
+Think step by step, then end your answer with:
+Final answer: <number>
+
+Problem:
+{question}
+"""
+
+        messages = [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ]
+
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        prompts.append(formatted_prompt)
+
+    inputs = tokenizer(
+        prompts,
+        padding=True,
+        truncation=True,
+        return_tensors="pt",
+        add_special_tokens=False,
+    ).to(device)
+
+    padded_input_length = inputs["input_ids"].shape[1]
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    start_time = time.perf_counter()
+
+    with torch.inference_mode():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    batch_time = time.perf_counter() - start_time
+
+    results = []
+
+    for index in range(len(questions)):
+        generated_ids = output_ids[index][
+            padded_input_length:
+        ]
+
+        response = tokenizer.decode(
+            generated_ids,
+            skip_special_tokens=True,
+        )
+
+        results.append({
+            "response": response,
+            "output_tokens": len(generated_ids),
+        })
+
+    return results, batch_time

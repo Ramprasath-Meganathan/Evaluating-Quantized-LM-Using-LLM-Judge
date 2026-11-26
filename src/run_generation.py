@@ -13,6 +13,7 @@ from config import (
     MAX_NEW_TOKENS,
     MODEL_NAME,
     SEED,
+    BATCH_SIZE,
 )
 
 from model_utils import (
@@ -24,7 +25,7 @@ from model_utils import (
 from generation_utils import (
     append_jsonl,
     get_completed_ids,
-    generate_response,
+    generate_batch,
     load_jsonl,
     warm_up,
 )
@@ -62,31 +63,47 @@ def run(args):
         raise RuntimeError("CUDA GPU is not available.")
 
     gpu_name = torch.cuda.get_device_name(0)
+
     gpu_memory_gb = (
         torch.cuda.get_device_properties(0).total_memory
         / 1024**3
     )
 
     print("GPU:", gpu_name)
-    print("GPU memory:", round(gpu_memory_gb, 2), "GB")
+    print(
+        "GPU memory:",
+        round(gpu_memory_gb, 2),
+        "GB"
+    )
 
     input_path = Path(args.input)
     output_path = Path(args.output)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     records = load_jsonl(input_path)
-    completed_ids = get_completed_ids(output_path)
+
+    completed_ids = get_completed_ids(
+        output_path
+    )
 
     print("Total problems:", len(records))
-    print("Already completed:", len(completed_ids))
+    print(
+        "Already completed:",
+        len(completed_ids)
+    )
 
     tokenizer = load_tokenizer()
     model = load_model(args.precision)
     device = get_model_device(model)
 
     print("Model device:", device)
+    print("Batch size:", BATCH_SIZE)
 
+    # Warm up the GPU before measuring performance
     warm_up(
         model=model,
         tokenizer=tokenizer,
@@ -97,74 +114,135 @@ def run(args):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
-    total_start = time.perf_counter()
+    total_start_time = time.perf_counter()
     total_generation_time = 0.0
     total_output_tokens = 0
     completed_count = 0
 
-    for index, record in enumerate(records):
-        problem_id = record["problem_id"]
+    # Process multiple questions in each batch
+    for start in range(
+        0,
+        len(records),
+        BATCH_SIZE
+    ):
+        batch_records = records[
+            start:start + BATCH_SIZE
+        ]
 
-        if problem_id in completed_ids:
+        # Remove problems already saved from an earlier run
+        batch_records = [
+            record
+            for record in batch_records
+            if record["problem_id"]
+            not in completed_ids
+        ]
+
+        if not batch_records:
             continue
 
+        questions = [
+            record["question"]
+            for record in batch_records
+        ]
+
         try:
-            result = generate_response(
+            batch_results, batch_time = generate_batch(
                 model=model,
                 tokenizer=tokenizer,
-                question=record["question"],
+                questions=questions,
                 device=device,
                 max_new_tokens=MAX_NEW_TOKENS,
             )
 
-            output_record = {
-                "problem_id": problem_id,
-                "model": MODEL_NAME,
-                "precision": args.precision,
-                "question": record["question"],
-                "response": result["response"],
-                "input_tokens": result["input_tokens"],
-                "output_tokens": result["output_tokens"],
-                "generation_time_seconds": (
-                    result["generation_time_seconds"]
-                ),
-                "gpu": gpu_name,
-                "max_new_tokens": MAX_NEW_TOKENS,
-                "batch_size": 1,
-                "seed": SEED,
-            }
+            batch_output_tokens = 0
 
-            append_jsonl(output_path, output_record)
+            for record, result in zip(
+                batch_records,
+                batch_results,
+            ):
+                output_record = {
+                    "problem_id": record["problem_id"],
+                    "model": MODEL_NAME,
+                    "precision": args.precision,
+                    "question": record["question"],
+                    "response": result["response"],
+                    "output_tokens": result["output_tokens"],
+                    "batch_size": BATCH_SIZE,
+                    "batch_time_seconds": batch_time,
+                    "gpu": gpu_name,
+                    "max_new_tokens": MAX_NEW_TOKENS,
+                    "seed": SEED,
+                }
 
-            completed_count += 1
-            total_output_tokens += result["output_tokens"]
-            total_generation_time += (
-                result["generation_time_seconds"]
+                # Save each response immediately
+                append_jsonl(
+                    output_path,
+                    output_record,
+                )
+
+                completed_ids.add(
+                    record["problem_id"]
+                )
+
+                completed_count += 1
+
+                batch_output_tokens += (
+                    result["output_tokens"]
+                )
+
+            total_output_tokens += (
+                batch_output_tokens
             )
 
+            # Add the batch time only once
+            total_generation_time += batch_time
+
             print(
-                f"[{index + 1}/{len(records)}] "
-                f"problem_id={problem_id} "
-                f"time={result['generation_time_seconds']:.2f}s"
+                "Completed problems "
+                f"{start + 1}-"
+                f"{start + len(batch_records)} "
+                f"in {batch_time:.2f} seconds"
             )
 
         except Exception as error:
-            print(
-                f"Error on problem {problem_id}: {error}"
-            )
-            print("Continuing with the next problem.")
+            problem_ids = [
+                record["problem_id"]
+                for record in batch_records
+            ]
 
-    total_elapsed = time.perf_counter() - total_start
+            print(
+                f"Error in batch {problem_ids}: "
+                f"{error}"
+            )
+
+            print(
+                "Continuing with the next batch."
+            )
+
+    total_elapsed_time = (
+        time.perf_counter()
+        - total_start_time
+    )
 
     peak_memory_mb = (
-        torch.cuda.max_memory_allocated() / 1024**2
+        torch.cuda.max_memory_allocated()
+        / 1024**2
     )
 
     tokens_per_second = None
 
     if total_generation_time > 0:
         tokens_per_second = (
-            total_output_tokens / total_generation_time
+            total_output_tokens
+            / total_generation_time
+        )
+
+    average_time_per_problem = None
+
+    if completed_count > 0:
+        average_time_per_problem = (
+            total_generation_time
+            / completed_count
         )
 
     metrics = {
@@ -173,17 +251,23 @@ def run(args):
         "gpu": gpu_name,
         "num_dataset_records": len(records),
         "completed_this_run": completed_count,
+        "batch_size": BATCH_SIZE,
         "peak_gpu_memory_mb": peak_memory_mb,
-        "total_elapsed_seconds": total_elapsed,
+        "total_elapsed_seconds": total_elapsed_time,
         "total_generation_seconds": total_generation_time,
+        "average_time_per_problem_seconds": (
+            average_time_per_problem
+        ),
         "total_output_tokens": total_output_tokens,
         "tokens_per_second": tokens_per_second,
         "max_new_tokens": MAX_NEW_TOKENS,
-        "batch_size": 1,
         "seed": SEED,
     }
 
-    save_metrics(args.metrics, metrics)
+    save_metrics(
+        args.metrics,
+        metrics
+    )
 
     print("\nExperiment complete.")
     print(json.dumps(metrics, indent=2))
