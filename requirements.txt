@@ -5,3 +5,7 @@ bitsandbytes>=0.46.1
 datasets
 numpy
 pandas
+scipy
+statsmodels
+scikit-learn
+matplotlib
