@@ -106,7 +106,7 @@ def get_completed_ids(output_path):
             try:
                 record = json.loads(line)
                 completed_ids.add(record["problem_id"])
-            except Exception:
+            except json.JSONDecodeError:
                 continue
 
     return completed_ids
@@ -208,7 +208,7 @@ Problem:
 
         results.append({
             "response": response,
-            "output_tokens": len(generated_ids),
+            "output_tokens": int((generated_ids != tokenizer.pad_token_id).sum()),
         })
 
     return results, batch_time

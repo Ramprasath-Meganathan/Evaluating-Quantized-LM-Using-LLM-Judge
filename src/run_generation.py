@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import traceback
 
 from config import (
     INPUT_FILE,
@@ -97,7 +98,10 @@ def run(args):
     )
 
     tokenizer = load_tokenizer()
+    print("pad:", tokenizer.pad_token_id, tokenizer.pad_token)
+    print("eos:", tokenizer.eos_token_id, tokenizer.eos_token)
     model = load_model(args.precision)
+    print("dtype:", model.get_input_embeddings().weight.dtype)
     device = get_model_device(model)
 
     print("Model device:", device)
@@ -172,6 +176,7 @@ def run(args):
                     "gpu": gpu_name,
                     "max_new_tokens": MAX_NEW_TOKENS,
                     "seed": SEED,
+                    "truncated": result["output_tokens"] >= MAX_NEW_TOKENS
                 }
 
                 # Save each response immediately
@@ -210,14 +215,20 @@ def run(args):
                 for record in batch_records
             ]
 
-            print(
-                f"Error in batch {problem_ids}: "
-                f"{error}"
+            print(f"Batch failed: {problem_ids}")
+            traceback.print_exc()
+
+            append_jsonl(
+                "results/failed_batches.jsonl",
+                {
+                    "problem_ids": problem_ids,
+                    "precision": args.precision,
+                    "error": repr(error),
+                },
             )
 
-            print(
-                "Continuing with the next batch."
-            )
+            if isinstance(error, torch.cuda.OutOfMemoryError):
+                raise
 
     total_elapsed_time = (
         time.perf_counter()

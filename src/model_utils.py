@@ -6,7 +6,7 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
-from config import MODEL_NAME
+from config import MODEL_NAME, MODEL_DTYPE
 
 
 def load_tokenizer():
@@ -24,7 +24,7 @@ def load_model(precision):
     if precision == "fp16":
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch.float16,
+            dtype=MODEL_DTYPE,
             device_map="auto",
         )
 
@@ -36,6 +36,7 @@ def load_model(precision):
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
             quantization_config=quantization_config,
+            dtype=MODEL_DTYPE,
             device_map="auto",
         )
 
@@ -43,13 +44,14 @@ def load_model(precision):
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=MODEL_DTYPE,
             bnb_4bit_use_double_quant=True,
         )
 
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
             quantization_config=quantization_config,
+            dtype=MODEL_DTYPE,
             device_map="auto",
         )
 
